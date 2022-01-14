@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 )
 
 const (
@@ -17,14 +18,27 @@ const (
 	urlRest             = "/rest/api/2"
 	urlMethodCreatemeta = "/issue/createmeta"
 	urlMethodSearch     = "/search"
+	urlMethodIssue      = "/issue/"
+	urlMethodWorklog    = "/worklog"
 )
 
+// CONFIG
+
 type ConfigT struct {
-	Hostname string `json:"hostname,omitempty"`
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
-	JQL      string `json:"jql,omitempty"`
+	Hostname string         `json:"hostname,omitempty"`
+	Username string         `json:"username,omitempty"`
+	Password string         `json:"password,omitempty"`
+	JQL      string         `json:"jql,omitempty"`
+	Worklog  ConfigWorklogT `json:"worklog,omitempty"`
 }
+
+type ConfigWorklogT struct {
+	Author string `json:"author,omitempty"`
+	Begin  string `json:"begin,omitempty"`
+	End    string `json:"end,omitempty"`
+}
+
+// JIRA
 
 type JiraSearchIssueT struct {
 	MaxResults int           `json:"maxResults,omitempty"`
@@ -36,6 +50,22 @@ type JiraIssuesT struct {
 	Key string `json:"key,omitempty"`
 }
 
+type JiraIssueWorklogT struct {
+	MaxResults int            `json:"maxResults,omitempty"`
+	Total      int            `json:"total,omitempty"`
+	Worklogs   []JiraWorklogT `json:"worklogs,omitempty"`
+}
+
+type JiraWorklogT struct {
+	Started          string      `json:"started,omitempty"`
+	TimeSpentSeconds int         `json:"timeSpentSeconds,omitempty"`
+	Author           JiraAuthorT `json:"author,omitempty"`
+}
+
+type JiraAuthorT struct {
+	Name string `json:"name,omitempty"`
+}
+
 // MAIN ------------------------------------------------------------------------
 
 func main() {
@@ -45,9 +75,10 @@ func main() {
 
 	var totalWorklog int
 	for _, issue := range issues {
-		totalWorklog += jiraIssueGetWorklog(issue.Key)
+		totalWorklog += jiraIssueGetWorklog(config, issue.Key)
 	}
 
+	// TODO: Convert seconds to hours
 	fmt.Printf("Total Worklog: %d\n", totalWorklog)
 }
 
@@ -74,34 +105,72 @@ func getconfigConnect(filename string) ConfigT {
 // JIRA ISSUE
 
 func jiraSearchIssue(config ConfigT) []JiraIssuesT {
+	// TODO: generate JQL from config's values
 	url := urlMethodSearch + "?jql=" + config.JQL
 	response := jiraRestGet(config, url)
 
-	var search JiraSearchIssueT
-	err := json.Unmarshal(response, &search)
+	var found JiraSearchIssueT
+	err := json.Unmarshal(response, &found)
 	if err != nil {
 		log.Fatalf("Error in unmarshal '%s'", err.Error())
 	}
 
+	// TODO: merge duplicate comparison "Total" and "MaxResults"
 	// Max Result by default is 50 items
-	if search.Total > search.MaxResults {
-		log.Fatalf("Total items '%d' more max result '%d'", search.Total, search.MaxResults)
+	if found.Total > found.MaxResults {
+		log.Fatalf("Total items '%d' more max result '%d'", found.Total, found.MaxResults)
 	}
 
-	return search.Issues
+	return found.Issues
 }
 
 // JIRA ISSUE WORKLOG
 
-func jiraIssueGetWorklog(issue string) int {
-	//TODO: Get sum issue worklog by period and author (get_issue_worklog)
+func jiraIssueGetWorklog(config ConfigT, issue string) int {
 	var totalWorklog int
+
+	worklogs := jiraGetWorklogs(config, issue)
+	for _, worklog := range worklogs {
+		// TODO: filter by Author and search period
+		if worklog.Author.Name != config.Worklog.Author {
+			continue
+		}
+
+		// Use field 'started', but not 'created', exemple:
+		//* '2021-01-26T07:20:00.000+0400'
+		started := strings.SplitN(worklog.Started, "T", 2)[0]
+		if started < config.Worklog.Begin || config.Worklog.End < started {
+			continue
+		}
+
+		totalWorklog += worklog.TimeSpentSeconds
+	}
 
 	return totalWorklog
 }
 
+func jiraGetWorklogs(config ConfigT, issue string) []JiraWorklogT {
+	url := urlMethodIssue + issue + urlMethodWorklog
+	response := jiraRestGet(config, url)
+
+	var found JiraIssueWorklogT
+	err := json.Unmarshal(response, &found)
+	if err != nil {
+		log.Fatalf("Error in unmarshal '%s'", err.Error())
+	}
+
+	// TODO: merge duplicate comparison "Total" and "MaxResults"
+	// Max Result by default is 50 items
+	if found.Total > found.MaxResults {
+		log.Fatalf("Total items '%d' more max result '%d'", found.Total, found.MaxResults)
+	}
+
+	return found.Worklogs
+}
+
 // JIRA REST -------------------------------------------------------------------
 
+// TODO: 'config' is static data for all REST methods
 func jiraRestGet(config ConfigT, urlRequest string) []byte {
 	url := config.Hostname + urlRest + urlRequest
 	log.Printf("Request URL '%s'", url)
